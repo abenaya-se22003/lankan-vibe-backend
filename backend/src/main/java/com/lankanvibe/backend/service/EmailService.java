@@ -13,13 +13,24 @@ import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
+import java.time.Duration;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * EmailService - Sends professional HTML transactional emails to customers
+ * Supports Brevo HTTP API, Resend HTTP API, and standard Spring Boot JavaMail (SMTP).
+ * HTTP APIs use port 443 (HTTPS), which works seamlessly on Render Free Tier and campus Wi-Fi.
  */
 @Service
 public class EmailService {
@@ -27,6 +38,9 @@ public class EmailService {
     private static final Logger log = LoggerFactory.getLogger(EmailService.class);
 
     private final ObjectProvider<JavaMailSender> mailSenderProvider;
+    private final HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(10))
+            .build();
 
     @Value("${app.mail.from:Lankan Vibe <no-reply@lankanvibe.com>}")
     private String mailFrom;
@@ -36,6 +50,23 @@ public class EmailService {
 
     @Value("${spring.mail.username:}")
     private String mailUsername;
+
+    // Brevo (Sendinblue) API settings (uses HTTPS port 443)
+    @Value("${app.mail.brevo-api-key:${BREVO_API_KEY:}}")
+    private String brevoApiKey;
+
+    @Value("${app.mail.brevo-sender-email:${BREVO_SENDER_EMAIL:}}")
+    private String brevoSenderEmail;
+
+    @Value("${app.mail.brevo-sender-name:${BREVO_SENDER_NAME:Lankan Vibe}}")
+    private String brevoSenderName;
+
+    // Resend API settings (uses HTTPS port 443)
+    @Value("${app.mail.resend-api-key:${RESEND_API_KEY:}}")
+    private String resendApiKey;
+
+    @Value("${app.mail.resend-from:${RESEND_FROM:Lankan Vibe <onboarding@resend.dev>}}")
+    private String resendFrom;
 
     public EmailService(ObjectProvider<JavaMailSender> mailSenderProvider) {
         this.mailSenderProvider = mailSenderProvider;
@@ -59,61 +90,201 @@ public class EmailService {
             return;
         }
 
+        String customerName = order.getCustomerName() != null && !order.getCustomerName().trim().isEmpty()
+                ? order.getCustomerName().trim()
+                : "Valued Customer";
+
+        String subject = "Order Confirmed! Receipt for Order #" + order.getId() + " - Lankan Vibe";
+        String htmlBody = buildOrderConfirmationHtml(order, paymentMethod);
+
+        log.info("Sending order confirmation email to '{}' for Order #{}...", recipientEmail, order.getId());
+        boolean sent = sendHtmlEmail(recipientEmail, customerName, subject, htmlBody);
+        if (sent) {
+            log.info("Order confirmation email successfully sent to '{}' for Order #{}", recipientEmail, order.getId());
+        } else {
+            log.warn("Failed to send order confirmation email to '{}' for Order #{}", recipientEmail, order.getId());
+        }
+    }
+
+    /**
+     * Helper to test email connection directly
+     */
+    public boolean testSendEmail(String testRecipient) {
+        String testSubject = "Lankan Vibe - Email Service Verification";
+        String testHtml = "<div style=\"font-family: Arial, sans-serif; padding: 20px; color: #333;\">"
+                + "<h2 style=\"color: #10b981;\">&#10004; Lankan Vibe Email Service Working!</h2>"
+                + "<p>This is a test email verifying that your Lankan Vibe email configuration is functioning properly!</p>"
+                + "<p style=\"font-size: 13px; color: #666;\">Sent from Lankan Vibe Clothing Backend.</p>"
+                + "</div>";
+
+        return sendHtmlEmail(testRecipient, "Test Recipient", testSubject, testHtml);
+    }
+
+    /**
+     * Universal method to send HTML emails:
+     * 1. If BREVO_API_KEY is configured -> uses Brevo HTTP REST API (port 443)
+     * 2. Else if RESEND_API_KEY is configured -> uses Resend HTTP REST API (port 443)
+     * 3. Else -> falls back to standard Spring JavaMailSender (SMTP port 587)
+     */
+    public boolean sendHtmlEmail(String toEmail, String toName, String subject, String htmlBody) {
+        if (!mailEnabled) {
+            log.info("Email service disabled via app.mail.enabled=false. Skipped email to {}", toEmail);
+            return false;
+        }
+
+        if (brevoApiKey != null && !brevoApiKey.trim().isEmpty()) {
+            return sendViaBrevoApi(toEmail, toName, subject, htmlBody);
+        } else if (resendApiKey != null && !resendApiKey.trim().isEmpty()) {
+            return sendViaResendApi(toEmail, subject, htmlBody);
+        } else {
+            return sendViaSmtp(toEmail, subject, htmlBody);
+        }
+    }
+
+    /**
+     * Sends email via Brevo (Sendinblue) HTTP API over HTTPS (Port 443).
+     * Works 100% on Render Free Tier and campus Wi-Fi networks.
+     */
+    private boolean sendViaBrevoApi(String toEmail, String toName, String subject, String htmlBody) {
+        try {
+            log.info("Dispatching email to '{}' via Brevo HTTP API...", toEmail);
+
+            String senderEmail = (brevoSenderEmail != null && !brevoSenderEmail.trim().isEmpty())
+                    ? brevoSenderEmail.trim()
+                    : (mailUsername != null && !mailUsername.trim().isEmpty() ? mailUsername.trim() : "thehufes@gmail.com");
+
+            String recipientJson = "{\"email\":" + quote(toEmail.trim())
+                    + (toName != null && !toName.trim().isEmpty() ? ",\"name\":" + quote(toName.trim()) : "") + "}";
+
+            String requestBody = "{"
+                    + "\"sender\":{\"name\":" + quote(brevoSenderName) + ",\"email\":" + quote(senderEmail) + "},"
+                    + "\"to\":[" + recipientJson + "],"
+                    + "\"subject\":" + quote(subject) + ","
+                    + "\"htmlContent\":" + quote(htmlBody)
+                    + "}";
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.brevo.com/v3/smtp/email"))
+                    .header("api-key", brevoApiKey.trim())
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+                    .timeout(Duration.ofSeconds(15))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                log.info("Email successfully sent via Brevo HTTP API to '{}' (HTTP {})", toEmail, response.statusCode());
+                return true;
+            } else {
+                log.error("Brevo HTTP API failed for '{}': HTTP {} - {}", toEmail, response.statusCode(), response.body());
+                return false;
+            }
+        } catch (Exception e) {
+            log.error("Exception calling Brevo HTTP API for '{}': {}", toEmail, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Sends email via Resend HTTP API over HTTPS (Port 443).
+     * Works 100% on Render Free Tier and campus Wi-Fi networks.
+     */
+    private boolean sendViaResendApi(String toEmail, String subject, String htmlBody) {
+        try {
+            log.info("Dispatching email to '{}' via Resend HTTP API...", toEmail);
+
+            String requestBody = "{"
+                    + "\"from\":" + quote(resendFrom) + ","
+                    + "\"to\":[" + quote(toEmail.trim()) + "],"
+                    + "\"subject\":" + quote(subject) + ","
+                    + "\"html\":" + quote(htmlBody)
+                    + "}";
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.resend.com/emails"))
+                    .header("Authorization", "Bearer " + resendApiKey.trim())
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(requestBody, StandardCharsets.UTF_8))
+                    .timeout(Duration.ofSeconds(15))
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            if (response.statusCode() >= 200 && response.statusCode() < 300) {
+                log.info("Email successfully sent via Resend HTTP API to '{}' (HTTP {})", toEmail, response.statusCode());
+                return true;
+            } else {
+                log.error("Resend HTTP API failed for '{}': HTTP {} - {}", toEmail, response.statusCode(), response.body());
+                return false;
+            }
+        } catch (Exception e) {
+            log.error("Exception calling Resend HTTP API for '{}': {}", toEmail, e.getMessage(), e);
+            return false;
+        }
+    }
+
+    /**
+     * Helper to safely escape and quote strings into JSON format
+     */
+    private static String quote(String string) {
+        if (string == null) {
+            return "\"\"";
+        }
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < string.length(); i++) {
+            char c = string.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\b' -> sb.append("\\b");
+                case '\f' -> sb.append("\\f");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < ' ') {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        sb.append("\"");
+        return sb.toString();
+    }
+
+    /**
+     * Fallback: Sends email using standard Spring Boot JavaMailSender (SMTP).
+     */
+    private boolean sendViaSmtp(String toEmail, String subject, String htmlBody) {
         JavaMailSender mailSender = mailSenderProvider.getIfAvailable();
         if (mailSender == null) {
-            log.warn("JavaMailSender bean is not available. Please check spring-boot-starter-mail configuration.");
-            return;
+            log.warn("JavaMailSender bean is not available. Please check mail configuration.");
+            return false;
         }
 
         if (mailUsername == null || mailUsername.trim().isEmpty()) {
-            log.warn("Order #{} placed successfully! Confirmation email to '{}' was not sent because MAIL_USERNAME is not set in backend/.env. Add your Gmail/SMTP credentials to send live emails.",
-                    order.getId(), recipientEmail);
-            return;
+            log.warn("Email to '{}' was not sent because neither BREVO_API_KEY, RESEND_API_KEY, nor MAIL_USERNAME is set in .env.", toEmail);
+            return false;
         }
 
         try {
             MimeMessage mimeMessage = mailSender.createMimeMessage();
             MimeMessageHelper helper = new MimeMessageHelper(mimeMessage, true, "UTF-8");
-
             helper.setFrom(mailFrom);
-            helper.setTo(recipientEmail.trim());
-            helper.setSubject("Order Confirmed! Receipt for Order #" + order.getId() + " - Lankan Vibe");
-
-            String htmlBody = buildOrderConfirmationHtml(order, paymentMethod);
+            helper.setTo(toEmail.trim());
+            helper.setSubject(subject);
             helper.setText(htmlBody, true);
 
-            log.info("Sending order confirmation email to '{}' for Order #{}...", recipientEmail, order.getId());
+            log.info("Sending email via SMTP to '{}'...", toEmail);
             mailSender.send(mimeMessage);
-            log.info("Order confirmation email successfully sent to '{}' for Order #{}", recipientEmail, order.getId());
-
-        } catch (MessagingException e) {
-            log.error("Failed to construct or send email for Order #{}: {}", order.getId(), e.getMessage(), e);
-        } catch (Exception e) {
-            log.error("Unexpected error sending email to '{}' for Order #{}: {}", recipientEmail, order.getId(), e.getMessage(), e);
-        }
-    }
-
-    /**
-     * Helper to test SMTP connection directly
-     */
-    public boolean testSendEmail(String testRecipient) {
-        JavaMailSender mailSender = mailSenderProvider.getIfAvailable();
-        if (mailSender == null) {
-            log.warn("JavaMailSender is not available");
-            return false;
-        }
-        try {
-            MimeMessage mimeMessage = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(mimeMessage, false, "UTF-8");
-            helper.setFrom(mailFrom);
-            helper.setTo(testRecipient);
-            helper.setSubject("Lankan Vibe - SMTP Test Email");
-            helper.setText("This is a test email verifying that your Lankan Vibe email service is working properly!", false);
-            mailSender.send(mimeMessage);
-            log.info("Test email successfully sent to {}", testRecipient);
+            log.info("Email successfully sent via SMTP to '{}'", toEmail);
             return true;
         } catch (Exception e) {
-            log.error("SMTP test failed for {}: {}", testRecipient, e.getMessage(), e);
+            log.error("SMTP error sending email to '{}': {}", toEmail, e.getMessage(), e);
             return false;
         }
     }
