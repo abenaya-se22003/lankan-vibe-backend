@@ -22,17 +22,32 @@ import java.util.List;
 public class OrderController {
 
     private final OrderService orderService;
+    private final com.lankanvibe.backend.service.EmailService emailService;
 
-    public OrderController(OrderService orderService) {
+    public OrderController(OrderService orderService, com.lankanvibe.backend.service.EmailService emailService) {
         this.orderService = orderService;
+        this.emailService = emailService;
     }
 
-    // POST /api/orders - Place a new order from current cart
+    // POST /api/orders - Place a new order (supports both logged-in and guest customers)
     @PostMapping("/orders")
     public ResponseEntity<OrderDto> createOrder(@AuthenticationPrincipal UserDetails userDetails,
                                                 @Valid @RequestBody CreateOrderRequest request) {
-        OrderDto created = orderService.createOrderFromCart(userDetails.getUsername(), request);
+        String userEmail = userDetails != null ? userDetails.getUsername() : null;
+        OrderDto created = orderService.createOrder(userEmail, request);
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
+    }
+
+    // POST /api/orders/test-email - Test SMTP configuration
+    @PostMapping("/orders/test-email")
+    public ResponseEntity<String> testEmail(@RequestParam String to) {
+        boolean sent = emailService.testSendEmail(to);
+        if (sent) {
+            return ResponseEntity.ok("Test email successfully sent to " + to);
+        } else {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body("Failed to send test email. Please check server logs and MAIL_USERNAME / MAIL_PASSWORD settings in backend/.env.");
+        }
     }
 
     // GET /api/orders/my - Get authenticated user's order history

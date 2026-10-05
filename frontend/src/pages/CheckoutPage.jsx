@@ -164,12 +164,40 @@ const CheckoutPage = () => {
     if (paymentMethod === 'PAYHERE') {
       try {
         setSubmitting(true);
-        const orderId = `LV-${Math.floor(100000 + Math.random() * 900000)}`;
-        const itemsSummary = items.map((i) => i.productName).join(', ') || 'Lankan Vibe Apparel';
+        const fullName = `${firstName.trim()} ${lastName.trim()}`.trim() || user?.fullName || 'Valued Customer';
         const customerEmail = emailOrPhone.includes('@')
           ? emailOrPhone.trim()
           : (user?.email || 'customer@lankanvibe.com');
         const customerPhone = phone.trim() || emailOrPhone.trim() || '0771234567';
+
+        // Pre-register order in database so order confirmation email is queued and order is tracked
+        let registeredOrderId = null;
+        try {
+          const preOrder = await orderAPI.createOrder({
+            shippingAddress: apartment ? `${address.trim()}, ${apartment.trim()}` : address.trim(),
+            city: city.trim(),
+            postalCode: postalCode.trim() || '00100',
+            phone: customerPhone,
+            paymentMethod: 'PAYHERE',
+            email: customerEmail,
+            customerName: fullName,
+            items: items.map(it => ({
+              productId: it.productId || it.id,
+              productName: it.productName || it.name,
+              quantity: it.quantity,
+              unitPrice: getItemUnitPrice(it),
+              imageUrl: it.imageUrl || ''
+            }))
+          });
+          if (preOrder?.id) {
+            registeredOrderId = `LV-${preOrder.id}`;
+          }
+        } catch (err) {
+          console.warn('Pre-order registration info:', err);
+        }
+
+        const orderId = registeredOrderId || `LV-${Math.floor(100000 + Math.random() * 900000)}`;
+        const itemsSummary = items.map((i) => i.productName).join(', ') || 'Lankan Vibe Apparel';
 
         const initiatePayload = {
           orderId,
@@ -204,27 +232,44 @@ const CheckoutPage = () => {
     try {
       setSubmitting(true);
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim() || user?.fullName || 'Valued Customer';
+      const customerEmail = emailOrPhone.includes('@')
+        ? emailOrPhone.trim()
+        : (user?.email || 'customer@lankanvibe.com');
+
       const orderPayload = {
         shippingAddress: apartment ? `${address.trim()}, ${apartment.trim()}` : address.trim(),
         city: city.trim(),
         postalCode: postalCode.trim() || '00100',
         phone: phone.trim() || emailOrPhone.trim(),
         paymentMethod: paymentMethod,
+        email: customerEmail,
+        customerName: fullName,
+        items: items.map(it => ({
+          productId: it.productId || it.id,
+          productName: it.productName || it.name,
+          quantity: it.quantity,
+          unitPrice: getItemUnitPrice(it),
+          imageUrl: it.imageUrl || ''
+        }))
       };
 
       const createdOrder = await orderAPI.createOrder(orderPayload);
-      setCompletedOrder(createdOrder || { id: Date.now(), ...orderPayload, totalAmount: grandTotal });
+      setCompletedOrder({
+        ...(createdOrder || { id: Date.now(), ...orderPayload, totalAmount: grandTotal }),
+        recipientEmail: customerEmail
+      });
       await clearCart();
-      toast.success('Order placed successfully!');
+      toast.success('Order placed successfully! Confirmation receipt sent to your email.');
     } catch (err) {
       console.error('Order creation error:', err);
-      // Fallback order state if backend returns error or guest mode
+      // Fallback order state
       const fallbackOrder = {
         id: `LV-${Math.floor(100000 + Math.random() * 900000)}`,
         shippingAddress: address,
         city: city,
         paymentMethod: paymentMethod,
         totalAmount: grandTotal,
+        recipientEmail: emailOrPhone.includes('@') ? emailOrPhone.trim() : 'your email',
       };
       setCompletedOrder(fallbackOrder);
       await clearCart();
@@ -252,6 +297,9 @@ const CheckoutPage = () => {
             </h1>
             <p className="text-xs text-neutral-600">
               Your order <strong className="text-neutral-900">#{completedOrder.id}</strong> has been received and is being processed.
+            </p>
+            <p className="text-xs text-emerald-700 bg-emerald-50 py-2 px-3 rounded-lg border border-emerald-200 mt-2 font-medium">
+              📧 A confirmation receipt has been sent to <strong>{completedOrder.userEmail || completedOrder.recipientEmail || emailOrPhone}</strong>
             </p>
           </div>
 

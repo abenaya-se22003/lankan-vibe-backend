@@ -467,12 +467,12 @@ const AdminPage = () => {
                       <td className="py-4 px-6">
                         <span className="font-bold text-[#c9a84c]">#{o.id}</span>
                         <p className="text-[10px] text-gray-500">
-                          {o.createdAt ? new Date(o.createdAt).toLocaleDateString() : 'Recent'}
+                          {o.orderDate ? new Date(o.orderDate).toLocaleDateString() : (o.createdAt ? new Date(o.createdAt).toLocaleDateString() : 'Recent')}
                         </p>
                       </td>
                       <td className="py-4 px-4">
                         <p className="font-bold text-white">{o.customerName || 'Customer'}</p>
-                        <p className="text-[10px] text-gray-400">{o.customerEmail}</p>
+                        <p className="text-[10px] text-gray-400">{o.userEmail || o.customerEmail}</p>
                         <p className="text-[10px] text-gray-400">{o.phone}</p>
                       </td>
                       <td className="py-4 px-4">
